@@ -19,6 +19,7 @@ Puisque les LLM sont capables de générer du texte, ils sont souvent considér�
 </div>
 *Figure 1.1 : Comme le suggère cette représentation hiérarchique de la relation entre les différents domaines, les LLM représentent une application spécifique des techniques de deep learning, utilisant leur capacité à traiter et générer du texte de type humain. Le deep learning est une branche spécialisée du machine learning qui se concentre sur l’utilisation de réseaux de neurones à plusieurs couches. Le machine learning et le deep learning visent à mettre en œuvre des algorithmes permettant aux ordinateurs d’apprendre à partir de données et d’effectuer des tâches qui nécessitent généralement une intelligence humaine.*
 
+\
 La distinction fondamentale entre le *machine learning* traditionnel et le *deep learning* réside dans l'extraction des caractéristiques. Le *machine learning* consiste à développer des algorithmes capables d'apprendre à partir de données sans être explicitement programmés, mais il nécessite une extraction manuelle des caractéristiques. Dans un filtre anti-spam classique par exemple, des experts humains doivent identifier manuellement les caractéristiques pertinentes (comme la fréquence du mot « gratuit » ou la présence de liens suspects). 
 
 À l'inverse, le *deep learning* utilise des réseaux de neurones comportant trois couches ou plus (réseaux de neurones profonds) pour modéliser directement des motifs et des abstractions complexes dans les données, sans nécessiter d'extraction manuelle des caractéristiques par des experts humains. (À noter que, dans un cadre d'apprentissage supervisé comme un filtre anti-spam, les deux méthodes nécessitent tout de même la collecte de labels initiaux).
@@ -57,6 +58,7 @@ La première étape, le **préentraînement**, s'effectue sur un immense corpus 
 </div>
 *Figure 1.3 : Le préentraînement d’un LLM consiste à prédire le mot suivant sur de grands jeux de données textuels. Un LLM préentraîné peut ensuite être affiné à l’aide d’un plus petit jeu de données annoté.*
 
+\
 La seconde étape, l'**affinage (fine-tuning)**, sert à spécialiser ce modèle de base. Il s'agit d'un entraînement supplémentaire sur un jeu de données plus restreint mais, cette fois-ci, spécifiquement annoté. L'affinage se divise généralement en deux approches très populaires :
 - Le *fine-tuning par instruction* : le modèle est entraîné sur des paires instruction-réponse (par exemple, une consigne de traduction et le texte traduit correspondant).
 - Le *fine-tuning pour la classification* : le modèle s'entraîne à associer des textes à des étiquettes spécifiques (par exemple, trier des e-mails en "spam" ou "non-spam").
@@ -94,6 +96,7 @@ De l'architecture d'origine ont dérivé deux grandes familles de modèles, adap
 </div>
 *Figure 1.6 : En plus de la complétion de texte, les LLM de type GPT peuvent résoudre diverses tâches en fonction de leurs entrées, sans nécessiter de réentraînement (few-shot ou zero-shot setting).*
 
+\
 *(Note : Dans cet ouvrage, le terme "LLM" désigne par convention les modèles basés sur les transformers, bien qu'historiquement d'autres architectures existent).*
 
 ### 1.5 Utilisation de grands jeux de données
@@ -117,6 +120,7 @@ Les modèles GPT (Generative Pre-trained Transformer) ont été conçus par Open
 </div>
 *Figure 1.7 : Dans la tâche de préentraînement de prédiction du mot suivant pour les modèles GPT, le système apprend à prédire le mot à venir dans une phrase en regardant les mots qui le précèdent.*
 
+\
 Cette prédiction du mot suivant est une forme d’apprentissage auto-supervisé. Le texte lui-même fournit la solution (l'étiquette), ce qui permet de s'affranchir de la très coûteuse annotation manuelle par des humains et d'utiliser d'immenses jeux de données textuelles non annotés. 
 
 Contrairement au transformer d'origine (qui combinait encodeur et décodeur), l'architecture de GPT est plus simple : elle n'utilise que la partie **décodeur**. Le modèle génère le texte de façon itérative, un mot à la fois de gauche à droite, en réutilisant ses propres sorties précédentes comme entrées. C'est ce qu'on appelle un modèle **autorégressif**. Bien que simplifiée dans sa structure de base, cette architecture est poussée à une échelle gigantesque (GPT-3 possède 96 couches et 175 milliards de paramètres).
@@ -128,6 +132,7 @@ Contrairement au transformer d'origine (qui combinait encodeur et décodeur), l'
 </div>
 *Figure 1.8 : L’architecture GPT n’utilise que la partie décodeur du transformer d’origine. Elle est conçue pour un traitement unidirectionnel, de gauche à droite, ce qui la rend particulièrement adaptée à la génération de texte et à la prédiction du mot suivant, générant le texte de façon itérative, un mot à la fois.*
 
+\
 L'un des aspects les plus fascinants de ces modèles est l'apparition de **comportements émergents**. Bien qu'entraînés uniquement à prédire le mot suivant, l'exposition à des données si vastes et diverses permet aux modèles GPT de "comprendre" et de résoudre des tâches complexes (comme la traduction) pour lesquelles ils n'ont jamais été explicitement programmés.
 
 ### 1.7 Construire un grand modèle de langage
