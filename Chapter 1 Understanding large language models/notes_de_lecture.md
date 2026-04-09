@@ -78,9 +78,10 @@ Le cœur de ce système est le mécanisme d'**auto-attention** (*self-attention*
 </div>
 *Figure 1.4 : Représentation simplifiée de l’architecture transformer d’origine, un modèle de deep learning pour la traduction automatique.*
 
+\
 De l'architecture d'origine ont dérivé deux grandes familles de modèles, adaptées à des tâches distinctes :
-- **BERT** : Ce modèle repose uniquement sur le sous-module **encodeur**. Il s'entraîne en prédisant des mots masqués, ce qui le rend particulièrement redoutable pour les tâches de classification de texte (analyse de sentiment, catégorisation de documents, détection de toxicité).
-- **GPT** : Ce modèle se concentre sur le sous-module **décodeur**. Orienté vers la génération de texte (prédiction du mot suivant), il est très polyvalent. Il est notamment capable de résoudre des tâches pour lesquelles il n'a pas été explicitement entraîné avec peu ou pas d'exemples préalables (*few-shot* ou *zero-shot learning*).
+- **BERT (Bidirectional Encoder Representations from Transformers)** : Ce modèle repose uniquement sur le sous-module **encodeur**. Il s'entraîne en prédisant des mots masqués, ce qui le rend particulièrement redoutable pour les tâches de classification de texte (analyse de sentiment, catégorisation de documents, détection de toxicité).
+- **GPT (Generative Pretrained Transformers)** : Ce modèle se concentre sur le sous-module **décodeur**. Orienté vers la génération de texte (prédiction du mot suivant), il est très polyvalent. Il est notamment capable de résoudre des tâches pour lesquelles il n'a pas été explicitement entraîné avec peu ou pas d'exemples préalables (*few-shot* ou *zero-shot learning*).
 
 <div align="center">
 
