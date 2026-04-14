@@ -16,8 +16,10 @@ Puisque les LLM sont capables de générer du texte, ils sont souvent considér�
 
 ![Figure 1.1](img/figure_1.1.png)
 
-</div>
+
 *Figure 1.1 : Comme le suggère cette représentation hiérarchique de la relation entre les différents domaines, les LLM représentent une application spécifique des techniques de deep learning, utilisant leur capacité à traiter et générer du texte de type humain. Le deep learning est une branche spécialisée du machine learning qui se concentre sur l’utilisation de réseaux de neurones à plusieurs couches. Le machine learning et le deep learning visent à mettre en œuvre des algorithmes permettant aux ordinateurs d’apprendre à partir de données et d’effectuer des tâches qui nécessitent généralement une intelligence humaine.*
+
+</div>
 
 \
 La distinction fondamentale entre le *machine learning* traditionnel et le *deep learning* réside dans l'extraction des caractéristiques. Le *machine learning* consiste à développer des algorithmes capables d'apprendre à partir de données sans être explicitement programmés, mais il nécessite une extraction manuelle des caractéristiques. Dans un filtre anti-spam classique par exemple, des experts humains doivent identifier manuellement les caractéristiques pertinentes (comme la fréquence du mot « gratuit » ou la présence de liens suspects). 
@@ -38,8 +40,10 @@ L'objectif final de l'ouvrage est d'ailleurs de démystifier le fonctionnement i
 
 ![Figure 1.2](img/figure_1.2.png)
 
-</div>
+
 *Figure 1.2 : Les interfaces LLM permettent une communication en langage naturel entre les utilisateurs et les systèmes d’IA. Cette capture d’écran montre ChatGPT écrivant un poème selon les instructions d’un utilisateur.*
+
+</div>
 
 ### 1.3 Étapes de construction et d’utilisation des LLM
 
@@ -55,8 +59,10 @@ La première étape, le **préentraînement**, s'effectue sur un immense corpus 
 
 ![Figure 1.3](img/figure_1.3.png)
 
-</div>
+
 *Figure 1.3 : Le préentraînement d’un LLM consiste à prédire le mot suivant sur de grands jeux de données textuels. Un LLM préentraîné peut ensuite être affiné à l’aide d’un plus petit jeu de données annoté.*
+
+</div>
 
 \
 La seconde étape, l'**affinage (fine-tuning)**, sert à spécialiser ce modèle de base. Il s'agit d'un entraînement supplémentaire sur un jeu de données plus restreint mais, cette fois-ci, spécifiquement annoté. L'affinage se divise généralement en deux approches très populaires :
@@ -75,8 +81,10 @@ Le cœur de ce système est le mécanisme d'**auto-attention** (*self-attention*
 
 ![Figure 1.4](img/figure_1.4.png)
 
-</div>
+
 *Figure 1.4 : Représentation simplifiée de l’architecture transformer d’origine, un modèle de deep learning pour la traduction automatique.*
+
+</div>
 
 \
 De l'architecture d'origine ont dérivé deux grandes familles de modèles, adaptées à des tâches distinctes :
@@ -87,15 +95,19 @@ De l'architecture d'origine ont dérivé deux grandes familles de modèles, adap
 
 ![Figure 1.5](img/figure_1.5.png)
 
-</div>
+
 *Figure 1.5 : Représentation visuelle des sous-modules encodeur et décodeur du transformer. À gauche, BERT (encodeur pour la classification). À droite, GPT (décodeur pour la génération).*
+
+</div>
 
 <div align="center">
 
 ![Figure 1.6](img/figure_1.6.png)
 
-</div>
+
 *Figure 1.6 : En plus de la complétion de texte, les LLM de type GPT peuvent résoudre diverses tâches en fonction de leurs entrées, sans nécessiter de réentraînement (few-shot ou zero-shot setting).*
+
+</div>
 
 \
 *(Note : Dans cet ouvrage, le terme "LLM" désigne par convention les modèles basés sur les transformers, bien qu'historiquement d'autres architectures existent).*
@@ -118,8 +130,10 @@ Les modèles GPT (Generative Pre-trained Transformer) ont été conçus par Open
 
 ![Figure 1.7](img/figure_1.7.png)
 
-</div>
+
 *Figure 1.7 : Dans la tâche de préentraînement de prédiction du mot suivant pour les modèles GPT, le système apprend à prédire le mot à venir dans une phrase en regardant les mots qui le précèdent.*
+
+</div>
 
 \
 Cette prédiction du mot suivant est une forme d’apprentissage auto-supervisé. Le texte lui-même fournit la solution (l'étiquette), ce qui permet de s'affranchir de la très coûteuse annotation manuelle par des humains et d'utiliser d'immenses jeux de données textuelles non annotés. 
@@ -130,8 +144,10 @@ Contrairement au transformer d'origine (qui combinait encodeur et décodeur), l'
 
 ![Figure 1.8](img/figure_1.8.png)
 
-</div>
+
 *Figure 1.8 : L’architecture GPT n’utilise que la partie décodeur du transformer d’origine. Elle est conçue pour un traitement unidirectionnel, de gauche à droite, ce qui la rend particulièrement adaptée à la génération de texte et à la prédiction du mot suivant, générant le texte de façon itérative, un mot à la fois.*
+
+</div>
 
 \
 L'un des aspects les plus fascinants de ces modèles est l'apparition de **comportements émergents**. Bien qu'entraînés uniquement à prédire le mot suivant, l'exposition à des données si vastes et diverses permet aux modèles GPT de "comprendre" et de résoudre des tâches complexes (comme la traduction) pour lesquelles ils n'ont jamais été explicitement programmés.
@@ -148,8 +164,10 @@ La construction d'un LLM depuis la base, qui est l'objectif global de ce livre, 
 
 ![Figure 1.9](img/figure_1.9.png)
 
-</div>
+
 *Figure 1.9 : Les trois grandes étapes pour coder un LLM sont : implémenter l’architecture du LLM et le processus de préparation des données (étape 1), préentraîner un LLM pour créer un modèle de base (étape 2), et affiner ce modèle de base pour en faire un assistant personnel ou un classificateur de texte (étape 3).*
+
+</div>
 
 ### Résumé du chapitre
 
