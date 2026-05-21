@@ -710,3 +710,167 @@ tensor([[ 1.2753, -0.2010, -0.1606],   # Ligne d'index 2
 
 > **Note sur le One-hot encoding :**
 > Utiliser une couche d'embedding est mathématiquement et fondamentalement équivalent à appliquer un encodage "one-hot" suivi d'une multiplication matricielle (couche fully connected). La couche d'embedding est cependant une implémentation beaucoup plus efficace en termes de calculs, tout en restant un composant différentiable pour la rétropropagation.
+
+## 2.8 Encodage de la position des mots
+
+Les embeddings de tokens présentent un défaut structurel majeur : peu importe qu'un mot apparaisse en début, au milieu ou en fin de phrase, son vecteur d'embedding reste rigoureusement identique. Pire, le mécanisme de *self-attention* des LLMs (abordé au chapitre 3) est, par construction, **invariant à l'ordre** : il traite la séquence d'entrée comme un simple ensemble non ordonné de tokens, sans aucune notion de précédence ou de proximité.
+
+<div align="center">
+
+![Figure 2.17](img/figure_2.17.png)
+
+*Figure 2.17 : La couche d'embedding assigne la même représentation vectorielle à un token,
+quelle que soit sa position dans la séquence. Par exemple, le `token_id` 5, qu'il soit en
+première ou en quatrième position dans le vecteur d'entrée, produira toujours le même vecteur
+d'embedding.*
+
+</div>
+
+Il est donc indispensable d'injecter une information de position dans ces embeddings pour que le réseau comprenne l'ordre des mots.
+
+Il existe deux grandes familles d'encodages positionnels :
+
+* **Encodages de position absolue :** Un vecteur de position distinct est associé à chaque indice de la séquence (le token à la position 0 reçoit un vecteur fixe, celui en position 1 un autre, etc.). Ces vecteurs ont la même dimension que les embeddings de tokens, et leur sont **additionnés** terme à terme. C'est l'approche retenue par OpenAI pour ses modèles GPT : les vecteurs de position absolue sont des paramètres appris et optimisés lors de l'entraînement, au même titre que les poids du réseau.
+
+<div style="margin-top: 20px;"></div>
+
+> ⚠️ **Limite à l'inférence :** La couche `pos_embedding_layer` est une matrice de poids de dimensions `(context_length, output_dim)`. Avec `context_length = 1024`, cette matrice possède exactement 1 024 lignes — une par position, de l'indice 0 à l'indice 1 023. Si, à l'inférence, on soumet une séquence de 1 500 tokens, le modèle tente d'accéder aux lignes 1 024 à 1 499, qui **n'existent pas**. PyTorch lève immédiatement une erreur : `IndexError: index out of range in self`. Le modèle ne se dégrade pas progressivement : il **plante**. C'est pourquoi toute séquence dépassant `context_length` doit être tronquée avant d'être soumise au modèle.
+
+
+* **Encodages de position relative :** Plutôt que d'encoder la position absolue de chaque token, ce type d'encodage modélise la **distance** entre deux tokens — c'est-à-dire leur écart relatif dans la séquence. Concrètement, au lieu d'injecter un vecteur de position dans l'embedding d'entrée, l'information positionnelle est intégrée directement au sein du **calcul du score d'attention** entre deux tokens $i$ et $j$ : ce score dépend alors de $(i - j)$ plutôt que de $i$ et $j$ séparément.
+
+L'avantage principal est une **meilleure généralisation hors-distribution** : le modèle n'a jamais mémorisé de vecteur fixe par position absolue — il a appris à raisonner en termes d'*écarts entre tokens*, qui restent valables quelle que soit la longueur totale de la séquence.
+
+<div align="center">
+
+![Figure 2.18](img/figure_2.18.png)
+
+*Figure 2.18 : Les embeddings positionnels sont additionnés aux embeddings de tokens pour
+former les embeddings d'entrée finaux du LLM. Les vecteurs positionnels ont la même dimension
+que les embeddings de tokens.*
+
+</div>
+
+---
+
+### Implémentation en PyTorch
+
+Dans l'approche GPT (position absolue), on crée deux couches `torch.nn.Embedding` distinctes, toutes deux de même dimension de sortie :
+
+1. Une couche pour encoder le **sens** des tokens (indexée sur le vocabulaire).
+2. Une couche pour encoder la **position** des tokens dans la séquence.
+
+Nous travaillons ici avec une dimension d'embedding de 256 — inférieure aux 12 288 dimension de GPT-3, mais suffisante pour l'expérimentation — et le tokenizer BPE introduit précédemment, qui couvre un vocabulaire de 50 257 tokens.
+
+#### Étape 1 — Créer la couche d'embedding des tokens
+
+```python
+vocab_size = 50257
+output_dim = 256
+
+token_embedding_layer = torch.nn.Embedding(vocab_size, output_dim)
+```
+
+#### Étape 2 — Charger un batch depuis le DataLoader
+
+Instancions d'abord le DataLoader (voir section 2.6) pour récupérer un batch d'exemples :
+
+```python
+max_length = 4
+dataloader = create_dataloader_v1(
+    raw_text, batch_size=8, max_length=max_length,
+    stride=max_length, shuffle=False
+)
+data_iter = iter(dataloader)
+inputs, targets = next(data_iter)
+
+print("Token IDs:\n", inputs)
+print("\nInputs shape:\n", inputs.shape)
+```
+
+```
+Token IDs:
+ tensor([[  40,  367, 2885, 1464],
+         [1807, 3619,  402,  271],
+         [10899, 2138,  257, 7026],
+         [15632,  438, 2016,  257],
+         [  922, 5891, 1576,  438],
+         [  568,  340,  373,  645],
+         [ 1049, 5975,  284,  502],
+         [  284, 3285,  326,   11]])
+
+Inputs shape:
+ torch.Size([8, 4])
+```
+
+Le tenseur `inputs` est de dimension `(8, 4)` : 8 exemples textuels, chacun composé de 4 tokens.
+
+#### Étape 3 — Appliquer l'embedding des tokens
+
+```python
+token_embeddings = token_embedding_layer(inputs)
+print(token_embeddings.shape)
+```
+
+```
+torch.Size([8, 4, 256])
+```
+
+Chaque `token_id` est désormais représenté par un vecteur de 256 dimensions.
+
+#### Étape 4 — Créer la couche d'embedding des positions
+
+```python
+context_length = max_length  # Longueur maximale de la séquence d'entrée
+
+pos_embedding_layer = torch.nn.Embedding(context_length, output_dim)
+pos_embeddings = pos_embedding_layer(torch.arange(context_length))
+print(pos_embeddings.shape)
+```
+
+```
+torch.Size([4, 256])
+```
+
+> `torch.arange(context_length)` génère simplement `[0, 1, 2, ..., context_length - 1]`.
+
+C'est la liste de tous les indices de position, passée à la couche pour en récupérer **toutes les lignes d'un coup** — le vecteur de la position 0, puis celui de la position 1, etc.
+
+#### Étape 5 — Additionner pour former l'entrée finale
+
+```python
+input_embeddings = token_embeddings + pos_embeddings
+print(input_embeddings.shape)
+```
+
+```
+torch.Size([8, 4, 256])
+```
+
+Grâce au mécanisme de *broadcasting* de PyTorch, le tenseur `pos_embeddings` de dimensions `(4, 256)` — identique pour chaque exemple du batch — s'additionne automatiquement à chacun des 8 exemples dans `token_embeddings` de dimensions `(8, 4, 256)`. C'est ce tenseur final `input_embeddings` qui est transmis aux couches profondes du modèle.
+
+<div align="center">
+
+![Figure 2.19](img/figure_2.19.png)
+
+*Figure 2.19 : Résumé du pipeline de traitement de l'entrée. Le texte est tokenisé, converti en `token_ids`, transformé en embeddings de tokens, auxquels on additionne les embeddings positionnels pour former les `input_embeddings` transmis aux couches principales du LLM.*
+
+</div>
+
+---
+
+### Ce qu'il faut retenir de ce chapitre
+
+* **Les LLMs ne traitent pas le texte brut :** Le texte doit d'abord être segmenté en *tokens* (mots ou sous-mots), puis transformé en entiers appelés `token_ids`.
+
+* **Les tokens spéciaux :** Des balises comme `<|unk|>` ou `<|endoftext|>` servent à structurer les données et à délimiter des textes indépendants lors de l'entraînement.
+
+* **Le tokenizer BPE (*Byte Pair Encoding*) :** Il permet aux LLMs comme GPT-2 ou GPT-3 de gérer tout mot inconnu en le décomposant en sous-mots ou en caractères.
+
+* **Échantillonnage par fenêtre glissante (*sliding window*) :** Lors de l'entraînement, les cibles (*labels*) sont extraites par un simple décalage de +1, pour apprendre au modèle à prédire systématiquement le token suivant.
+
+* **La couche `Embedding` en PyTorch :** Elle se comporte comme une table de correspondance (*lookup table*) : étant donné un `token_id` entier, elle retourne instantanément le vecteur correspondant. Mathématiquement, c'est équivalent à encoder le token en vecteur *one-hot* puis à le multiplier par une matrice de projection linéaire — mais l'implémentation directe est drastiquement plus efficace.
+
+* **Plongement sémantique :** Transformer un token abstrait en vecteur continu permet de disposer les mots dans un espace vectoriel de grande dimension, au sein duquel les relations sémantiques peuvent être optimisées numériquement.
+
+* **Encodage de position :** Le mécanisme de `self-attention` lit une séquence comme un ensemble non ordonné de tokens. Pour lui restituer la notion d'ordre, GPT additionne à chaque embedding de token un vecteur de position absolue appris — un vecteur par indice de la séquence, stocké dans une matrice de taille `(context_length, output_dim)`. Cette matrice impose une **contrainte dure** : toute séquence dépassant `context_length` tokens doit être tronquée, sous peine d'une erreur d'indice à l'inférence. Les architectures plus récentes préfèrent des encodages relatifs, intégrés dans le calcul des scores d'attention plutôt qu'additionnés aux embeddings, ce qui s'affranchit de cette limite de longueur.
