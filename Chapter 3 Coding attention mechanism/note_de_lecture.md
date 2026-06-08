@@ -770,3 +770,248 @@ Les sorties diffèrent entre `v1` et `v2` uniquement parce que les poids initiau
 ---
 
 La prochaine étape enrichit ce mécanisme de deux extensions : le **masque causal**, qui empêche chaque token d'accéder aux tokens futurs lors de la génération, et l'**attention multi-têtes**, qui fait tourner plusieurs mécanismes d'attention en parallèle pour capter différents types de relations entre tokens.
+
+---
+## 3.5 Masquer les tokens futurs avec l'attention causale
+
+L'attention causale (ou *masked attention*) est une variante de l'auto-attention qui contraint chaque token à n'accéder qu'aux tokens qui le précèdent (et à lui-même) dans la séquence. C'est l'opposé de l'auto-attention standard qui dispose de toute la séquence en entrée.
+
+Cette contrainte est fondamentale pour les LLMs de type GPT : lors de la prédiction du token suivant, le modèle ne doit pas « voir » les tokens futurs — ce serait une fuite d'information.
+
+---
+
+## 3.5.1 Appliquer un masque d'attention causale
+
+Il existe deux approches équivalentes pour obtenir la matrice de poids d'attention masquée.
+
+### Approche naïve : masquer après softmax
+
+**Étape 1 — Calculer les poids d'attention standards (softmax)**
+
+```python
+queries = sa_v2.W_query(inputs)
+keys    = sa_v2.W_key(inputs)
+attn_scores   = queries @ keys.T
+attn_weights  = torch.softmax(attn_scores / keys.shape[-1]**0.5, dim=-1)
+```
+```
+tensor([[0.1921, 0.1646, 0.1652, 0.1550, 0.1721, 0.1510],
+        [0.2041, 0.1659, 0.1662, 0.1496, 0.1665, 0.1477],
+        [0.2036, 0.1659, 0.1662, 0.1498, 0.1664, 0.1480],
+        [0.1869, 0.1667, 0.1668, 0.1571, 0.1661, 0.1564],
+        [0.1830, 0.1669, 0.1670, 0.1588, 0.1658, 0.1585],
+        [0.1935, 0.1663, 0.1666, 0.1542, 0.1666, 0.1529]],
+       grad_fn=<SoftmaxBackward0>)
+```
+
+**Étape 2 — Construire le masque triangulaire inférieur**
+
+```python
+context_length = attn_scores.shape[0]
+mask_simple    = torch.tril(torch.ones(context_length, context_length))
+```
+```
+tensor([[1., 0., 0., 0., 0., 0.],
+        [1., 1., 0., 0., 0., 0.],
+        [1., 1., 1., 0., 0., 0.],
+        [1., 1., 1., 1., 0., 0.],
+        [1., 1., 1., 1., 1., 0.],
+        [1., 1., 1., 1., 1., 1.]])
+```
+
+`torch.tril` conserve la diagonale et le triangle inférieur, et met à zéro le triangle supérieur — exactement les positions futures à masquer.
+
+**Étape 3 — Zeroing : multiplier les poids par le masque**
+
+```python
+masked_simple = attn_weights * mask_simple
+```
+```
+tensor([[0.1921, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000],
+        [0.2041, 0.1659, 0.0000, 0.0000, 0.0000, 0.0000],
+        [0.2036, 0.1659, 0.1662, 0.0000, 0.0000, 0.0000],
+        [0.1869, 0.1667, 0.1668, 0.1571, 0.0000, 0.0000],
+        [0.1830, 0.1669, 0.1670, 0.1588, 0.1658, 0.0000],
+        [0.1935, 0.1663, 0.1666, 0.1542, 0.1666, 0.1529]],
+       grad_fn=<MulBackward0>
+```
+
+Les positions futures valent maintenant 0, mais les lignes ne somment plus à 1 — la distribution de probabilité est rompue.
+
+**Étape 4 — Renormaliser**
+
+```python
+row_sums          = masked_simple.sum(dim=-1, keepdim=True)
+masked_simple_norm = masked_simple / row_sums
+```
+```
+tensor([[1.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000],
+        [0.5517, 0.4483, 0.0000, 0.0000, 0.0000, 0.0000],
+        [0.3800, 0.3097, 0.3103, 0.0000, 0.0000, 0.0000],
+        [0.2758, 0.2460, 0.2462, 0.2319, 0.0000, 0.0000],
+        [0.2175, 0.1983, 0.1984, 0.1888, 0.1971, 0.0000],
+        [0.1935, 0.1663, 0.1666, 0.1542, 0.1666, 0.1529]],
+       grad_fn=<DivBackward0>)
+```
+
+Chaque ligne somme à 1. Les poids masqués sont nuls, et les poids restants sont redistribués proportionnellement.
+
+---
+
+> **Note — Pas de fuite d'information**
+> On pourrait craindre que les tokens futurs aient déjà « contaminé » le résultat via le softmax initial, avant d'être mis à zéro. Ce n'est pas le cas. La renormalisation après masquage est mathématiquement équivalente à avoir calculé le softmax uniquement sur les positions non-masquées dès le départ. Les tokens futurs n'exercent aucune influence sur la distribution finale.
+
+<details>
+<summary>Démonstration</summary>
+
+### Cadre et notations
+
+Soit une séquence de $T$ tokens. À chaque token en position $j$ sont associés trois vecteurs obtenus par projections linéaires de son embedding :
+
+- $q_j \in \mathbb{R}^{d_k}$ : vecteur **requête** (*query*)
+- $k_j \in \mathbb{R}^{d_k}$ : vecteur **clé** (*key*)
+- $v_j \in \mathbb{R}^{d_v}$ : vecteur **valeur** (*value*)
+
+Pour un token courant en position $i$, le **score d'attention brut** avec chaque token en position $j$ est :
+
+$$e_{ij} = \frac{q_i^\top k_j}{\sqrt{d_k}} \in \mathbb{R}, \qquad j \in \{1, \dots, T\}$$
+
+La **sortie** du mécanisme d'attention pour le token $i$ est :
+
+$$z_i = \sum_{j=1}^{T} \alpha_{ij}\, v_j, \qquad \alpha_{ij} \geq 0, \quad \sum_{j=1}^{T} \alpha_{ij} = 1$$
+
+---
+
+### Méthode 1 — Softmax global, puis masquage et renormalisation
+
+**Étape 1 — Softmax sur l'ensemble des tokens.**
+
+On calcule les poids d'attention sans aucune restriction :
+
+$$\alpha_{ij} = \frac{e^{e_{ij}}}{\displaystyle\sum_{m=1}^{T} e^{e_{im}}}$$
+
+Tous les tokens contribuent au dénominateur, y compris les tokens futurs.
+
+**Étape 2 — Application du masque triangulaire.**
+
+On annule les poids correspondant aux tokens futurs :
+
+$$\tilde{\alpha}_{ij} = \begin{cases} \alpha_{ij} & \text{si } j \leq i \\ 0 & \text{si } j > i \end{cases}$$
+
+Après cette étape, les poids ne somment plus à 1 : on a retiré de la masse de probabilité.
+
+**Étape 3 — Renormalisation.**
+
+On divise chaque poids par la somme de la ligne :
+
+$$\alpha_{ij}^{(1)} = \frac{\tilde{\alpha}_{ij}}{\displaystyle\sum_{k=1}^{T} \tilde{\alpha}_{ik}}$$
+
+**Développement explicite.** On simplifie séparément le numérateur et le dénominateur.
+
+Au numérateur, on distingue deux cas selon la position de $j$ par rapport à $i$, en appliquant successivement la définition de $\tilde{\alpha}_{ij}$ (Étape 2) puis celle de $\alpha_{ij}$ (Étape 1) :
+
+$$\tilde{\alpha}_{ij} = \begin{cases} \alpha_{ij} = \dfrac{e^{e_{ij}}}{\displaystyle\sum_{m=1}^{T} e^{e_{im}}} & \text{si } j \leq i \\[10pt] 0 & \text{si } j > i \end{cases}$$
+
+Au dénominateur, on développe $\displaystyle\sum_{k=1}^{T} \tilde{\alpha}_{ik}$ en séparant les positions visibles ($k \leq i$) et futures ($k > i$), puis on applique successivement la définition de $\tilde{\alpha}_{ik}$ (Étape 2) puis celle de $\alpha_{ik}$ (Étape 1) :
+
+$$\sum_{k=1}^{T} \tilde{\alpha}_{ik} = \sum_{k \leq i} \underbrace{\tilde{\alpha}_{ik}}_{=\,\alpha_{ik}} + \sum_{k > i} \underbrace{\tilde{\alpha}_{ik}}_{=\,0} = \sum_{k \leq i} \alpha_{ik} = \sum_{k \leq i} \frac{e^{e_{ik}}}{\displaystyle\sum_{m=1}^{T} e^{e_{im}}}$$
+
+Le terme $\displaystyle\sum_{m=1}^{T} e^{e_{im}}$ est une constante par rapport à $k$, on peut le factoriser :
+
+$$\sum_{k=1}^{T} \tilde{\alpha}_{ik} = \frac{\displaystyle\sum_{k \leq i} e^{e_{ik}}}{\displaystyle\sum_{m=1}^{T} e^{e_{im}}}$$
+
+On substitue numérateur et dénominateur dans l'expression de $\alpha_{ij}^{(1)}$ pour $j \leq i$ :
+
+$$\alpha_{ij}^{(1)} = \frac{\tilde{\alpha}_{ij}}{\displaystyle\sum_{k=1}^{T} \tilde{\alpha}_{ik}} = \frac{\quad\dfrac{e^{e_{ij}}}{\displaystyle\sum_{m=1}^{T} e^{e_{im}}}\quad}{\dfrac{\displaystyle\sum_{k \leq i} e^{e_{ik}}}{\displaystyle\sum_{m=1}^{T} e^{e_{im}}}}$$
+
+Le facteur $\displaystyle\sum_{m=1}^{T} e^{e_{im}}$ est présent au numérateur **et** au dénominateur : il se simplifie exactement :
+
+$$\alpha_{ij}^{(1)} = \frac{e^{e_{ij}}}{\displaystyle\sum_{m=1}^{T} e^{e_{im}}} \times \frac{\displaystyle\sum_{m=1}^{T} e^{e_{im}}}{\displaystyle\sum_{k \leq i} e^{e_{ik}}}$$
+
+$$\boxed{\alpha_{ij}^{(1)} = \frac{e^{e_{ij}}}{\displaystyle\sum_{k \leq i} e^{e_{ik}}} \quad \text{pour } j \leq i, \qquad \alpha_{ij}^{(1)} = 0 \quad \text{pour } j > i}$$
+
+---
+
+### Méthode 2 — Masquage des scores bruts avant le softmax
+
+**Étape 1 — Masquage des scores bruts.**
+
+On remplace les scores des tokens futurs par $-\infty$ avant tout calcul :
+
+$$\tilde{e}_{ij} = \begin{cases} e_{ij} & \text{si } j \leq i \\ -\infty & \text{si } j > i \end{cases}$$
+
+**Étape 2 — Softmax unique sur les scores masqués.**
+
+$$\alpha_{ij}^{(2)} = \frac{e^{\,\tilde{e}_{ij}}}{\displaystyle\sum_{k=1}^{T} e^{\,\tilde{e}_{ik}}}$$
+
+**Développement explicite.** On décompose le dénominateur en séparant les positions visibles et futures, puis on applique la définition de $\tilde{e}_{ik}$ :
+
+$$\sum_{k=1}^{T} e^{\,\tilde{e}_{ik}} = \sum_{k \leq i} \underbrace{e^{\,\tilde{e}_{ik}}}_{=\,e^{e_{ik}}} + \sum_{k > i} \underbrace{e^{\,\tilde{e}_{ik}}}_{=\,e^{-\infty}\,=\,0} = \sum_{k \leq i} e^{e_{ik}}$$
+
+De même au numérateur, en appliquant la définition de $\tilde{e}_{ij}$ :
+
+$$e^{\,\tilde{e}_{ij}} = \begin{cases} e^{e_{ij}} & \text{si } j \leq i \\ e^{-\infty} = 0 & \text{si } j > i \end{cases}$$
+
+On obtient donc :
+
+$$\boxed{\alpha_{ij}^{(2)} = \frac{e^{e_{ij}}}{\displaystyle\sum_{k \leq i} e^{e_{ik}}} \quad \text{pour } j \leq i, \qquad \alpha_{ij}^{(2)} = 0 \quad \text{pour } j > i}$$
+
+---
+
+### Équivalence des deux méthodes
+
+La comparaison terme à terme des deux résultats encadrés est immédiate :
+
+$$\text{Pour } j \leq i : \quad \alpha_{ij}^{(1)} = \frac{e^{e_{ij}}}{\displaystyle\sum_{k \leq i} e^{e_{ik}}} = \alpha_{ij}^{(2)}$$
+
+$$\text{Pour } j > i : \quad \alpha_{ij}^{(1)} = 0 = \alpha_{ij}^{(2)}$$
+
+On conclut :
+
+$$\boxed{\alpha_{ij}^{(1)} = \alpha_{ij}^{(2)} \qquad \forall\, j \in \{1, \dots, T\}}$$
+
+Il s'agit d'une **égalité algébrique exacte**. Dans la Méthode 1, le facteur $\displaystyle\sum_{m=1}^{T} e^{e_{im}}$ introduit par le premier softmax s'annule exactement lors de la renormalisation. La présence initiale des tokens futurs dans le calcul n'a laissé **aucune trace** dans le résultat final : le dénominateur ne contient plus que $\displaystyle\sum_{k \leq i} e^{e_{ik}}$, exactement comme dans la Méthode 2 où les tokens futurs n'ont jamais été inclus. Il n'y a donc **aucune fuite d'information**.
+
+</details>
+
+---
+
+### Approche efficace : masquer avant softmax avec $-\infty$
+
+L'approche naïve applique softmax puis corrige. On peut faire mieux : masquer les scores d'attention **avant** le softmax en remplaçant les positions futures par $-\infty$.
+
+La justification est immédiate : $e^{-\infty} = 0$, donc softmax attribue automatiquement un poids nul à ces positions, et la somme des poids restants vaut 1 — sans aucune renormalisation manuelle.
+
+```python
+mask   = torch.triu(torch.ones(context_length, context_length), diagonal=1)
+masked = attn_scores.masked_fill(mask.bool(), -torch.inf)
+```
+
+`torch.triu` avec `diagonal=1` isole strictement le triangle **supérieur** (hors diagonale) — les positions futures. `masked_fill` remplace ces positions par $-\infty$.
+
+```
+tensor([[0.2899,   -inf,   -inf,   -inf,   -inf,   -inf],
+        [0.4656, 0.1723,   -inf,   -inf,   -inf,   -inf],
+        [0.4594, 0.1703, 0.1731,   -inf,   -inf,   -inf],
+        [0.2642, 0.1024, 0.1036, 0.0186,   -inf,   -inf],
+        [0.2183, 0.0874, 0.0882, 0.0177, 0.0786,   -inf],
+        [0.3408, 0.1270, 0.1290, 0.0198, 0.1290, 0.0078]],
+       grad_fn=<MaskedFillBackward0>)
+```
+
+Il suffit ensuite d'appliquer softmax :
+
+```python
+attn_weights = torch.softmax(masked / keys.shape[-1]**0.5, dim=-1)
+```
+```
+tensor([[1.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000],
+        [0.5517, 0.4483, 0.0000, 0.0000, 0.0000, 0.0000],
+        [0.3800, 0.3097, 0.3103, 0.0000, 0.0000, 0.0000],
+        [0.2758, 0.2460, 0.2462, 0.2319, 0.0000, 0.0000],
+        [0.2175, 0.1983, 0.1984, 0.1888, 0.1971, 0.0000],
+        [0.1935, 0.1663, 0.1666, 0.1542, 0.1666, 0.1529]],
+       grad_fn=<SoftmaxBackward0>)
+```
+
+Le résultat est identique à l'approche naïve, en deux étapes au lieu de quatre. C'est cette approche qui est retenue en pratique.
