@@ -1015,3 +1015,299 @@ tensor([[1.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000],
 ```
 
 Le résultat est identique à l'approche naïve, en deux étapes au lieu de quatre. C'est cette approche qui est retenue en pratique.
+
+---
+## 3.5.2 Masquer des poids d'attention supplémentaires avec le dropout
+
+Le dropout est une technique de régularisation proposée par Geoffrey Hinton en 2012. À chaque étape d'entraînement, chaque neurone a une probabilité $p$ (le *taux d'abandon*) d'être temporairement désactivé — ignoré pour cette passe, mais potentiellement actif à la suivante. Après l'entraînement, aucun neurone n'est jamais désactivé.
+
+L'intuition derrière cette technique peut sembler paradoxale. Imaginez une entreprise où chaque employé joue à pile ou face chaque matin pour décider s'il vient travailler. L'entreprise serait forcée de s'adapter : elle ne pourrait plus compter sur une seule personne pour une tâche critique, toutes les expertises devraient être distribuées, les employés apprendraient à collaborer avec de nombreux collègues plutôt qu'une poignée fixe. Elle deviendrait bien plus robuste. C'est exactement ce qui se passe dans un réseau de neurones : les neurones entraînés sous contrainte de dropout ne peuvent pas s'adapter de concert avec leurs voisins habituels — ils développent chacun une plus grande utilité propre et deviennent moins sensibles aux légères variations en entrée.
+
+Une autre façon de voir les choses : à chaque étape d'entraînement, le réseau actif est différent (parmi $2^N$ configurations possibles pour $N$ neurones). Le réseau final peut être vu comme un ensemble moyen de tous ces sous-réseaux.
+
+Dans le mécanisme d'attention, le dropout s'applique directement sur les poids d'attention — la variante la plus courante en pratique. Concrètement, le masque causal et le masque de dropout se superposent : le premier annule le triangle supérieur (tokens futurs), le second annule aléatoirement des positions supplémentaires parmi les tokens visibles.
+
+<div align="center">
+
+![Figure 3.22](img/figure_3.22.png)
+
+*Figure 3.22 : À partir de la matrice d'attention causale (triangle supérieur nul), un masque de dropout aléatoire est appliqué pour annuler des poids supplémentaires parmi les positions visibles, réduisant le risque de sur-apprentissage pendant l'entraînement.*
+
+</div>
+
+---
+
+### Mise à l'échelle automatique
+
+Avec un taux de dropout $p$, les poids survivants sont multipliés par $\frac{1}{1-p}$. C'est une correction nécessaire : pendant l'entraînement, un neurone n'est connecté en moyenne qu'à une fraction $(1-p)$ de ses entrées habituelles. Sans cette compensation, le neurone recevrait à l'inférence (où tous les neurones sont actifs) un signal d'une amplitude très différente de ce qu'il a appris.
+
+On vérifie ce comportement sur une matrice de 1s avec $p = 0.5$ :
+
+```python
+torch.manual_seed(123)
+dropout = torch.nn.Dropout(0.5)
+example = torch.ones(6, 6)
+print(dropout(example))
+```
+```
+tensor([[2., 2., 0., 2., 2., 0.],
+        [0., 0., 0., 2., 0., 2.],
+        [2., 2., 2., 2., 0., 2.],
+        [0., 2., 2., 0., 0., 2.],
+        [0., 2., 0., 2., 0., 2.],
+        [0., 2., 2., 2., 2., 0.]])
+```
+
+
+Les éléments restés non nuls après le dropout valent $\frac{1}{1 - 0.5} = 2$, confirmant la mise à l'échelle.
+
+---
+
+### Application aux poids d'attention causale
+
+```python
+torch.manual_seed(123)
+print(dropout(attn_weights))
+```
+```
+tensor([[2.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000],
+        [0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000],
+        [0.7599, 0.6194, 0.6206, 0.0000, 0.0000, 0.0000],
+        [0.0000, 0.4921, 0.4925, 0.0000, 0.0000, 0.0000],
+        [0.0000, 0.3966, 0.0000, 0.3775, 0.0000, 0.0000],
+        [0.0000, 0.3327, 0.3331, 0.3084, 0.3331, 0.0000]],
+       grad_fn=<MulBackward0>)
+```
+
+Le masque causal (triangle supérieur nul) est préservé. Le dropout vient s'y superposer en annulant aléatoirement des poids supplémentaires parmi les positions visibles, et en rescalant les survivants.
+
+> **Note** — Les résultats du dropout peuvent varier selon le système d'exploitation, indépendamment du `manual_seed`. Ce comportement est documenté dans le [suivi de problèmes PyTorch](https://github.com/pytorch/pytorch/issues/121595).
+>
+---
+Tu as raison sur les deux points. Le troisième "problème" que j'avais listé n'en était pas un distinct — c'était une reformulation du premier. Voici la section corrigée et les explications approfondies.
+
+---
+
+## 3.5.3 Implémenter une classe d'attention causale compacte
+
+On intègre maintenant le masque causal et le dropout dans une classe `CausalAttention` qui remplace `SelfAttention`. Cette classe doit également gérer des entrées en batch — plusieurs séquences traitées en parallèle.
+
+Pour simuler un batch, on duplique l'entrée :
+
+```python
+batch = torch.stack((inputs, inputs), dim=0)
+print(batch.shape)
+# torch.Size([2, 6, 3])
+```
+
+Un tenseur 3D de forme `(batch_size, num_tokens, d_in)` : 2 séquences, 6 tokens chacune, embeddings de dimension 3.
+
+---
+
+### Le code
+
+```python
+class CausalAttention(nn.Module):
+
+    def __init__(self, d_in, d_out, context_length, dropout, qkv_bias=False):
+        super().__init__()
+        self.d_out = d_out
+        self.W_query = nn.Linear(d_in, d_out, bias=qkv_bias)
+        self.W_key   = nn.Linear(d_in, d_out, bias=qkv_bias)
+        self.W_value = nn.Linear(d_in, d_out, bias=qkv_bias)
+        self.dropout = nn.Dropout(dropout)
+        self.register_buffer(
+            'mask',
+            torch.triu(torch.ones(context_length, context_length), diagonal=1)
+        )
+
+    def forward(self, x):
+        b, num_tokens, d_in = x.shape
+        keys    = self.W_key(x)
+        queries = self.W_query(x)
+        values  = self.W_value(x)
+
+        attn_scores = queries @ keys.transpose(1, 2)
+        attn_scores.masked_fill_(
+            self.mask.bool()[:num_tokens, :num_tokens], -torch.inf
+        )
+        attn_weights = torch.softmax(attn_scores / keys.shape[-1]**0.5, dim=-1)
+        attn_weights = self.dropout(attn_weights)
+
+        context_vec = attn_weights @ values
+        return context_vec
+```
+
+```python
+torch.manual_seed(123)
+context_length = batch.shape[1]
+ca = CausalAttention(d_in, d_out, context_length, 0.0)
+context_vecs = ca(batch)
+print("context_vecs.shape:", context_vecs.shape)
+# context_vecs.shape: torch.Size([2, 6, 2])
+```
+
+---
+
+### Point 1 — `register_buffer` : qu'est-ce que c'est et pourquoi ?
+
+Dans un `nn.Module` PyTorch, il existe deux types de tenseurs :
+
+**Les paramètres** (`nn.Parameter`) — les poids appris, enregistrés via `nn.Linear`. PyTorch les suit automatiquement : ils apparaissent dans `model.parameters()`, reçoivent des gradients, et sont déplacés sur GPU avec `model.to(device)`.
+
+**Les buffers** (`register_buffer`) — des tenseurs fixes, non appris, dont le modèle a besoin mais qui ne doivent pas être mis à jour par l'optimiseur. C'est exactement le cas du masque causal : il est constant, calculé une seule fois à l'initialisation.
+
+Sans `register_buffer`, on pourrait écrire directement `self.mask = torch.triu(...)`. Ça fonctionnerait en local — mais avec deux problèmes :
+
+Le masque ne serait **pas déplacé automatiquement sur GPU**. Si on fait `model.to("cuda")`, les poids migrent, mais pas `self.mask`. Au moment du `masked_fill_`, PyTorch lèverait une erreur de device mismatch : le masque est sur CPU, les scores d'attention sur GPU.
+
+Le masque **n'apparaîtrait pas dans `model.state_dict()`**, le dictionnaire qui capture l'état complet du modèle pour la sauvegarde. Un modèle rechargé depuis un checkpoint n'aurait plus son masque.
+
+`register_buffer` règle les deux : le masque suit le modèle partout (CPU/GPU) et est inclus dans `state_dict()`.
+
+---
+
+### Point 2 — Anatomie du code de masquage
+
+#### `register_buffer('mask', torch.triu(...))`
+
+L'appel `register_buffer('mask', tenseur)` fait deux choses : il enregistre le tenseur comme buffer du module, et il le rend accessible via `self.mask`. Le premier argument `'mask'` est simplement le nom sous lequel le buffer est enregistré — c'est ce nom qui devient l'attribut. On aurait pu écrire `register_buffer('causal_mask', ...)` et y accéder ensuite via `self.causal_mask`.
+
+Le tenseur enregistré est :
+
+```python
+torch.triu(torch.ones(context_length, context_length), diagonal=1)
+```
+
+`torch.triu` extrait le triangle supérieur d'une matrice. Avec `diagonal=1`, la diagonale principale est exclue — seules les positions strictement au-dessus valent 1 :
+
+```
+Mask with diagonal=1:
+ tensor([[0., 1., 1., 1., 1., 1.],
+        [0., 0., 1., 1., 1., 1.],
+        [0., 0., 0., 1., 1., 1.],
+        [0., 0., 0., 0., 1., 1.],
+        [0., 0., 0., 0., 0., 1.],
+        [0., 0., 0., 0., 0., 0.]])
+```
+
+Les 1 marquent exactement les positions futures à masquer.
+
+#### `attn_scores.masked_fill_(self.mask.bool()[:num_tokens, :num_tokens], -torch.inf)`
+
+Décomposons paramètre par paramètre.
+
+`self.mask.bool()` — convertit le masque de `float` (0.0 / 1.0) en `bool` (False / True). `masked_fill_` attend un masque booléen : les positions à `True` seront remplacées.
+
+`[:num_tokens, :num_tokens]` — le masque a été créé à l'initialisation avec la taille maximale `context_length × context_length`. La séquence courante peut être plus courte. Ce slicing extrait le sous-masque de la taille exacte de la séquence traitée, sans recréer le tenseur à chaque appel.
+
+`-torch.inf` — la valeur de remplacement pour les positions futures. Comme $e^{-\infty} = 0$, le softmax leur attribuera un poids nul.
+
+`masked_fill_` (avec underscore) — opération in-place : `attn_scores` est modifié directement en mémoire sans copie intermédiaire, ce qui économise de la mémoire pour des matrices d'attention potentiellement grandes.
+
+En résumé : pour chaque position $(i, j)$ où `self.mask[i,j]` vaut `True` (c'est-à-dire $j > i$, un token futur), la valeur correspondante dans `attn_scores` est remplacée par $-\infty$.
+
+---
+
+### Point 3 — `keys.transpose(1, 2)` au lieu de `keys.T`
+
+Dans la section 3.5.1, on avait `keys.T` car les entrées étaient 2D `(num_tokens, d_out)`. Ici `keys` est 3D : `(b, num_tokens, d_out)`. `.T` inverserait tous les axes — on obtiendrait `(d_out, num_tokens, b)`, ce qui est faux. `.transpose(1, 2)` n'échange que les deux dernières dimensions, donnant `(b, d_out, num_tokens)` : la dimension batch reste en position 0, et le produit matriciel opère correctement sur chaque séquence du batch indépendamment.
+
+---
+
+<div align="center">
+
+![Figure 3.23](img/figure_3.23.png)
+
+*Figure 3.23 : Progression de l'implémentation — de l'attention simplifiée à l'attention causale avec poids entraînables, masque causal et dropout. La prochaine étape est l'attention multi-têtes.*
+
+</div>
+
+---
+## 3.6 Étendre l'attention mono-tête à l'attention multi-têtes
+
+L'attention multi-têtes consiste à faire tourner le mécanisme d'attention plusieurs fois en parallèle, chacune avec ses propres matrices de poids $W_Q$, $W_K$, $W_V$. Chaque tête apprend à se spécialiser sur un type de relation différent dans la séquence. Un module `CausalAttention` seul correspond à l'attention mono-tête — un seul ensemble de poids traitant l'entrée.
+
+---
+
+## 3.6.1 Empiler plusieurs modules d'attention mono-tête
+
+### L'idée
+
+La façon la plus directe d'implémenter l'attention multi-têtes est d'instancier plusieurs `CausalAttention` indépendants, de les faire tourner sur la même entrée, et de concaténer leurs sorties.
+
+<div align="center">
+
+![Figure 3.24](img/figure_3.24.png)
+
+*Figure 3.24 : Un module d'attention multi-têtes avec deux têtes. Chaque tête dispose de ses propres matrices de poids $W_Q$, $W_K$, $W_V$, et produit ses propres vecteurs de contexte $Z_1$ et $Z_2$, ensuite concaténés en $Z$.*
+
+</div>
+
+### Implémentation
+
+```python
+class MultiHeadAttentionWrapper(nn.Module):
+
+    def __init__(self, d_in, d_out, context_length,
+                 dropout, num_heads, qkv_bias=False):
+        super().__init__()
+        self.heads = nn.ModuleList(
+            [CausalAttention(d_in, d_out, context_length, dropout, qkv_bias)
+             for _ in range(num_heads)]
+        )
+
+    def forward(self, x):
+        return torch.cat([head(x) for head in self.heads], dim=-1)
+```
+
+Deux points méritent attention.
+
+`nn.ModuleList` est une liste de modules `CausalAttention` dont les paramètres sont centralisés au niveau de `MultiHeadAttentionWrapper` — accessibles via `model.parameters()`, déplacés avec `model.to(device)`, et sauvegardés dans `state_dict()`.
+
+`torch.cat(..., dim=-1)` concatène les sorties de chaque tête le long de la dernière dimension — la dimension d'embedding. Si chaque tête produit des vecteurs de dimension `d_out`, la sortie finale a dimension `d_out × num_heads`.
+
+### Exemple
+
+```python
+torch.manual_seed(123)
+context_length = batch.shape[1]
+mha = MultiHeadAttentionWrapper(d_in, d_out, context_length, 0.0, num_heads=2)
+context_vecs = mha(batch)
+print(context_vecs)
+print("context_vecs.shape:", context_vecs.shape)
+```
+```
+tensor([[[-0.4519,  0.2216,  0.4772,  0.1063],
+         [-0.5874,  0.0058,  0.5891,  0.3257],
+         [-0.6300, -0.0632,  0.6202,  0.3860],
+         [-0.5675, -0.0843,  0.5478,  0.3589],
+         [-0.5526, -0.0981,  0.5321,  0.3428],
+         [-0.5299, -0.1081,  0.5077,  0.3493]],
+
+        [[-0.4519,  0.2216,  0.4772,  0.1063],
+         [-0.5874,  0.0058,  0.5891,  0.3257],
+         [-0.6300, -0.0632,  0.6202,  0.3860],
+         [-0.5675, -0.0843,  0.5478,  0.3589],
+         [-0.5526, -0.0981,  0.5321,  0.3428],
+         [-0.5299, -0.1081,  0.5077,  0.3493]]], grad_fn=<CatBackward0>)
+context_vecs.shape torch.Size([2, 6, 4])
+```
+
+La forme `(2, 6, 4)` se lit : 2 séquences dans le batch, 6 tokens chacune, vecteurs de contexte de dimension $2 \times 2 = 4$. Les deux séquences sont identiques (batch simulé par duplication), d'où des vecteurs de contexte identiques.
+
+<div align="center">
+
+![Figure 3.25](img/figure_3.25.png)
+
+*Figure 3.25 : Avec `num_heads=2` et `d_out=2`, chaque tête produit une matrice de vecteurs de contexte de dimension 2. Les deux matrices sont concaténées le long de la dimension des colonnes, donnant une dimension finale de $2 \times 2 = 4$.*
+
+</div>
+
+> **Exercice 3.2** — Pour obtenir des vecteurs de contexte de dimension 2 avec `num_heads=2`, il suffit de passer `d_out=1` : chaque tête produit des vecteurs de dimension 1, et leur concaténation donne bien la dimension 2.
+
+---
+
+### Limite de cette approche
+
+Les têtes sont traitées **séquentiellement** dans `forward` via `[head(x) for head in self.heads]`. C'est fonctionnellement correct mais inefficace : on effectue `num_heads` passes distinctes là où une seule opération matricielle pourrait tout calculer en parallèle. La section suivante présente une implémentation qui exploite cette parallélisation.
