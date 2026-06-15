@@ -1311,3 +1311,367 @@ La forme `(2, 6, 4)` se lit : 2 séquences dans le batch, 6 tokens chacune, vect
 ### Limite de cette approche
 
 Les têtes sont traitées **séquentiellement** dans `forward` via `[head(x) for head in self.heads]`. C'est fonctionnellement correct mais inefficace : on effectue `num_heads` passes distinctes là où une seule opération matricielle pourrait tout calculer en parallèle. La section suivante présente une implémentation qui exploite cette parallélisation.
+
+---
+## 3.6.2 Implémentation efficace par découpe de poids
+
+La classe `MultiHeadAttention` fusionne `MultiHeadAttentionWrapper` et
+`CausalAttention` en une seule entité. L'idée directrice : effectuer **une seule**
+projection linéaire de dimension $d_{out}$, puis découper implicitement ce résultat
+en $H = \texttt{num\_heads}$ sous-espaces de dimension $d_h = d_{out}/H$.
+Contrairement à `MultiHeadAttentionWrapper`, qui maintenait $H$ matrices de poids
+$W_{K,j} \in \mathbb{R}^{d_h \times d_{in}}$ et répétait la multiplication matricielle
+pour chaque tête, une seule multiplication suffit ici.
+
+<div align="center">
+
+![mha_explained_1](img/mha_explained/mha_explained_1.png)
+*Figure X : Vue d'ensemble du mécanisme d'attention multi-têtes (source : CNRS-FIDLE).*
+
+</div>
+
+Nous décrivons ci-dessous les transformations successives appliquées au tenseur des
+clés $K$ (les mêmes s'appliquent identiquement à $Q$ et $V$).
+
+---
+
+### Étape 1 — Projection unique : `(b, num_tokens, d_in)` → `(b, num_tokens, d_out)`
+
+```python
+keys = self.W_key(x)   # (b, num_tokens, d_out)
+```
+
+Chaque ligne du tenseur de sortie est le vecteur clé
+$\mathbf{k}_i = W_K^\top x_i \in \mathbb{R}^{d_{out}}$ du token $i$.
+
+---
+
+### Étape 2 — Découpe par tête via `.view()` : `(b, num_tokens, d_out)` → `(b, num_tokens, H, d_h)`
+
+```python
+keys = keys.view(b, num_tokens, self.num_heads, self.head_dim)
+```
+
+#### Ce que fait `.view()` concrètement
+
+Pour comprendre `.view()`, il faut d'abord comprendre comment PyTorch stocke les données.
+
+**La mémoire est un couloir de cases numérotées.** Quand PyTorch crée un tenseur, il réserve un bloc de cases consécutives en mémoire (RAM), une case par nombre. Par exemple, une matrice $2 \times 3$
+
+$$M = \begin{pmatrix} a & b & c \\ d & e & f \end{pmatrix}$$
+
+est stockée en mémoire comme une simple file de 6 cases :
+
+$$\boxed{a}\;\boxed{b}\;\boxed{c}\;\boxed{d}\;\boxed{e}\;\boxed{f}$$
+
+PyTorch mémorise juste deux informations séparément : (1) l'adresse de la première case, et (2) la forme `(2, 3)` qui lui permet de calculer où trouver chaque élément — l'élément en ligne $i$, colonne $j$ se trouve à la case $3i + j$.
+
+**`.view()` change la grille de lecture, pas la position physique des données.** Appeler `.view(3, 2)` sur cette même mémoire revient à décider de la lire comme
+
+$$M' = \begin{pmatrix} a & b \\ c & d \\ e & f \end{pmatrix}$$
+
+Ainsi, PyTorch va simplement mettre à jour la forme de `(2, 3)` à `(3, 2)` et recalculer la formule d'accès : l'élément $(i, j)$ est maintenant à la case $2i + j$. C'est tout.
+
+C'est pourquoi on dit que `.view()` est **sans copie** : il n'alloue pas de nouvelle mémoire, ne déplace aucun nombre. Il ne coûte presque rien en temps ni en mémoire, quelle que soit la taille du tenseur.
+
+#### Application à nos clés
+
+**Notation.** Pour un token $i$ et une tête $j$, notons
+$\mathbf{k}_{i,j} \in \mathbb{R}^{d_h}$ le sous-vecteur clé associé.
+
+Après l'étape 1, pour un token $i$ fixé, le vecteur
+$\mathbf{k}_i \in \mathbb{R}^{d_{out}}$ contient les projections de toutes les têtes
+mises bout à bout :
+
+$$K[\,b,\,i,\,:] = \mathbf{k}_i =
+\bigl[
+  \underbrace{k_{i,1,1},\ldots,k_{i,1,d_h}}_{\displaystyle\mathbf{k}_{i,1}},\;
+  \underbrace{k_{i,2,1},\ldots,k_{i,2,d_h}}_{\displaystyle\mathbf{k}_{i,2}},\;
+  \ldots,\;
+  \underbrace{k_{i,H,1},\ldots,k_{i,H,d_h}}_{\displaystyle\mathbf{k}_{i,H}}
+\bigr]$$
+
+`.view(b, num_tokens, H, d_h)` dit à PyTorch : "réinterprète la dimension
+$d_{out} = H \cdot d_h$ comme deux dimensions imbriquées". Sans rien déplacer
+en mémoire, le même token $i$ est maintenant accessible comme un bloc
+$(H, d_h)$ :
+
+$$K[\,b,\,i,\,:,\,:] = \begin{pmatrix} \mathbf{k}_{i,1} \\ \mathbf{k}_{i,2} \\ \vdots \\ \mathbf{k}_{i,H} \end{pmatrix} \in \mathbb{R}^{H \times d_h}$$
+
+La $j$-ième ligne de ce bloc est exactement $\mathbf{k}_{i,j}$, le vecteur clé
+du token $i$ pour la tête $j$.
+
+<div align="center">
+
+![view_operation_1](img/view_operation_1.png)
+*Figure X : `.view()` réinterprète la dimension $d_{out}$ comme $(H, d_h)$.
+Pour chaque token $i$, le vecteur $\mathbf{k}_i \in \mathbb{R}^{d_{out}}$ devient
+un bloc $K[b, i, :, :] \in \mathbb{R}^{H \times d_h}$ dont la $j$-ième ligne
+est $\mathbf{k}_{i,j}$. Aucune donnée n'est déplacée en mémoire.*
+
+</div>
+
+---
+
+### Étape 3 — Réorganisation par tête via `.transpose(1, 2)` : `(b, num_tokens, H, d_h)` → `(b, H, num_tokens, d_h)`
+
+```python
+keys = keys.transpose(1, 2)
+```
+
+**Notation.** Notons
+
+$$K_j = \begin{pmatrix} \mathbf{k}_{1,j} \\ \vdots \\ \mathbf{k}_{T,j} \end{pmatrix}
+\in \mathbb{R}^{T \times d_h} \qquad (T = \texttt{num\_tokens})$$
+
+la matrice des clés de la tête $j$ sur l'ensemble de la séquence — toutes les
+projections du même sous-espace, une ligne par token.
+
+#### Ce que fait `.transpose()` concrètement — et pourquoi c'est différent de `.view()`
+
+Comme `.view()`, `.transpose()` ne déplace rien en mémoire — il change juste la formule d'accès. Mais il crée un **problème** que `.view()` n'avait pas.
+
+Reprenons la matrice $2 \times 3$ :
+
+$$M = \begin{pmatrix} 1 & 2 & 3 \\ 4 & 5 & 6 \end{pmatrix}$$
+
+Mémoire physique : $\boxed{1}\;\boxed{2}\;\boxed{3}\;\boxed{4}\;\boxed{5}\;\boxed{6}$
+
+Avec `.view(3, 2)`, PyTorch relisait ces mêmes cases en disant "3 lignes de 2 colonnes" — et chaque ligne consécutive était bien côte à côte en mémoire. Pas de problème.
+
+Soit $$ M.view(3, 2) \Rightarrow \begin{pmatrix} 1 & 2 \\ 3 & 4 \\ 5 & 6 \end{pmatrix}$$
+
+Avec `.transpose()`, on obtient logiquement :
+
+$$M^\top = \begin{pmatrix} 1 & 4 \\ 2 & 5 \\ 3 & 6 \end{pmatrix}$$
+
+Pour lire la première ligne de $M^\top$ (les éléments $1$ et $4$), PyTorch doit sauter des cases : il prend la case 0 (1), puis la case 3 (4). Entre eux, il y a les cases 1 et 2 qui appartiennent logiquement à d'autres lignes. L'ordre logique et l'ordre mémoire divergent :
+
+$$\text{Ordre mémoire (intact)} : \boxed{1}\;\boxed{2}\;\boxed{3}\;\boxed{4}\;\boxed{5}\;\boxed{6}$$
+$$\text{Ordre logique (après transposition)} : 1\quad 4\quad 2\quad 5\quad 3\quad 6$$
+
+Un tenseur est **non contigu** quand lire ses éléments dans l'ordre logique exige de **sauter des cases** en mémoire.
+
+#### Les deux représentations du tenseur des clés
+
+**Représentation gauche — organisée par token.**
+Dans la forme `(b, num_tokens, H, d_h)` issue de `.view()`, la dimension
+d'itération principale est le token. Pour un token $i$ fixé, le bloc
+$K[\,b,\,i,\,:,\,:]$ regroupe les projections de toutes les têtes pour ce token :
+
+$$K[\,b,\,i,\,:,\,:] = \begin{pmatrix} \mathbf{k}_{i,1} \\ \vdots \\ \mathbf{k}_{i,H} \end{pmatrix} \in \mathbb{R}^{H \times d_h}$$
+
+On lit le tenseur *tête par tête pour un token donné*. En mémoire, les données
+sont rangées dans l'ordre : toutes les têtes du token 1, puis toutes les têtes
+du token 2, etc. Les matrices $K_1, \ldots, K_H$ existent conceptuellement, mais
+leurs lignes sont **entrelacées** — $\mathbf{k}_{1,1}$ suivi de $\mathbf{k}_{1,2}$,
+puis $\mathbf{k}_{2,1}$ suivi de $\mathbf{k}_{2,2}$, etc. Pour reconstituer $K_j$,
+il faudrait sauter des cases à chaque ligne.
+
+**Représentation droite — organisée par tête.**
+Après `.transpose(1, 2)`, la forme est `(b, H, num_tokens, d_h)`. Pour une tête $j$
+fixée, le bloc $K[\,b,\,j,\,:,\,:] = K_j$ regroupe les projections de tous les
+tokens pour cette tête :
+
+$$K[\,b,\,j,\,:,\,:] = K_j = \begin{pmatrix} \mathbf{k}_{1,j} \\ \vdots \\ \mathbf{k}_{T,j} \end{pmatrix} \in \mathbb{R}^{T \times d_h}$$
+
+On lit le tenseur *token par token pour une tête donnée*. Chaque $K_j$ forme
+un bloc logique indépendant. Mais comme vu ci-dessus, `.transpose()` n'a pas
+déplacé les données : l'ordre logique et l'ordre mémoire divergent encore. Le
+tenseur est non contigu.
+
+La transposition ne change pas les données, seulement la façon dont elles sont
+*traversées* : on passe d'une lecture par token à une lecture par tête.
+
+<div align="center">
+
+![view_operation_2](img/view_operation_2.png)
+*Figure X : `.transpose(1, 2)` permute les dimensions `num_tokens` et `num_heads`.
+À gauche, le bloc $K[b, i, :, :]$ regroupe toutes les têtes d'un token donné.
+À droite, le bloc $K[b, j, :, :] = K_j$ regroupe tous les tokens d'une tête donnée.
+La mémoire physique ne bouge pas — seul l'ordre de lecture change.*
+
+</div>
+
+---
+
+### Étape 4 — Scores d'attention par multiplication par lots
+
+$Q$, $K$, $V$ ayant tous la forme $(b, H, T, d_h)$, le produit
+
+```python
+attn_scores = queries @ keys.transpose(2, 3)
+```
+
+calcule $Q_j K_j^\top$ simultanément pour toutes les têtes et tous les éléments du
+batch :
+
+$$\texttt{attn\_scores}[\,b,\,j,\,:,\,:] = Q_j K_j^\top \in \mathbb{R}^{T \times T}$$
+
+<div align="center">
+
+![mha_explained_2](img/mha_explained/mha_explained_2.png)
+*Figure X : Calcul des scores d'attention par multiplication matricielle par lots
+(source : CNRS-FIDLE).*
+
+</div>
+
+---
+
+### Étape 5 — Recombinaison des têtes
+
+Après masquage causal, softmax et dropout, les vecteurs contexte sont recombinés :
+
+```python
+context_vec = (attn_weights @ values).transpose(1, 2)
+# (b, H, T, d_h) → (b, T, H, d_h)
+context_vec = context_vec.contiguous().view(b, num_tokens, self.d_out)
+# (b, T, H, d_h) → (b, T, d_out)
+```
+
+#### Ce que fait `.contiguous()` concrètement
+
+`.transpose()` a laissé le tenseur dans un état où ordre logique et ordre mémoire
+divergent. `.view()` ne sait pas gérer cet écart — il suppose toujours que lire
+les éléments dans l'ordre logique revient à les lire case après case en mémoire.
+Appeler `.view()` directement lèverait donc une erreur.
+
+`.contiguous()` résout cela : il alloue un **nouveau bloc mémoire** et y recopie
+les données dans l'ordre qui correspond à la forme logique actuelle.
+
+Avec notre exemple numérique : après `.transpose()`, le tenseur est logiquement
+$M^\top$ mais la mémoire contient encore $1, 2, 3, 4, 5, 6$ :
+
+$$\text{Ordre mémoire} : \boxed{1}\;\boxed{2}\;\boxed{3}\;\boxed{4}\;\boxed{5}\;\boxed{6}$$
+$$\text{Ordre logique} : 1\quad 4\quad 2\quad 5\quad 3\quad 6$$
+
+`.contiguous()` crée un nouveau bloc où les deux ordres coïncident :
+
+$$\text{Nouvelle mémoire} : \boxed{1}\;\boxed{4}\;\boxed{2}\;\boxed{5}\;\boxed{3}\;\boxed{6}$$
+
+`.view()` peut alors s'appliquer sans risque.
+
+> **En résumé.** `.view()` et `.transpose()` sont tous deux sans copie — ils ne
+> modifient que la façon dont PyTorch lit la mémoire. Mais `.transpose()` crée un
+> écart entre l'ordre logique et l'ordre mémoire que `.view()` ne sait pas gérer.
+> `.contiguous()` est la copie explicite qui les réconcilie.
+
+Le `.view(b, num_tokens, self.d_out)` qui suit concatène les sorties des $H$ têtes
+pour chaque token :
+
+$$\mathbf{c}_i = \mathbf{c}_{i,1} \| \mathbf{c}_{i,2} \| \cdots \| \mathbf{c}_{i,H}
+\in \mathbb{R}^{d_{out}}$$
+
+Enfin, une projection linéaire mélange les informations des différentes têtes :
+
+```python
+context_vec = self.out_proj(context_vec)
+```
+
+<div align="center">
+
+![mha_explained_3](img/mha_explained/mha_explained_3.png)
+*Figure X : Recombinaison des sorties des têtes et projection finale $W_O$
+(source : CNRS-FIDLE).*
+
+</div>
+
+## Exercice 3.3 — Initialisation d'un module d'attention de taille GPT-2
+
+### Énoncé
+
+À l'aide de la classe `MultiHeadAttention`, initialiser un module d'attention multi-têtes
+possédant le même nombre de têtes que le plus petit modèle GPT-2 (12 têtes). Utiliser
+également les dimensions d'embedding d'entrée et de sortie du modèle GPT-2 (768).
+Le plus petit GPT-2 supporte une longueur de contexte de 1 024 tokens.
+
+### Solution
+
+```python
+import torch
+import torch.nn as nn
+
+# Paramètres GPT-2 (smallest variant)
+d_in = 768              # input embedding dimension
+d_out = 768             # output embedding dimension (same as d_in in GPT-2)
+num_heads = 12          # number of attention heads
+context_length = 1024   # maximum context window
+
+# Initialiser le module d'attention multi-têtes
+mha = MultiHeadAttention(
+    d_in=d_in,
+    d_out=d_out,
+    context_length=context_length,
+    dropout=0.1,
+    num_heads=num_heads,
+    qkv_bias=False
+)
+
+# Afficher la configuration
+print(f"Configuration d'attention GPT-2 (smallest):")
+print(f"  Input dimension (d_in):     {d_in}")
+print(f"  Output dimension (d_out):   {d_out}")
+print(f"  Number of heads:            {num_heads}")
+print(f"  Head dimension:             {d_out // num_heads}")
+print(f"  Context length:             {context_length}")
+print(f"\nModule: {mha}")
+````
+
+---
+
+## Résumé du chapitre 3
+
+Les points clés du chapitre attention et multi-head attention :
+
+**Fondamentaux de l'attention**
+- Les mécanismes d'attention transforment un ensemble d'entrées en représentations
+  de contexte enrichies incorporant l'information de tous les tokens.
+- L'attention simple est une somme pondérée : chaque élément de sortie est une
+  combinaison linéaire des entrées, avec des poids appris par le modèle.
+- Les poids d'attention sont calculés via des **produits scalaires** entre requêtes
+  et clés, une formulation compacte et efficace.
+
+**Mécanisme d'attention à produit scalaire**
+- On introduit trois projections linéaires entraînables : **queries** ($Q$), **keys** ($K$),
+  et **values** ($V$), permettant au modèle d'apprendre quels types de relations
+  chercher et comment les exploiter.
+- Le score brut $e_{ij} = \frac{q_i^\top k_j}{\sqrt{d_k}}$ est normalisé par la racine
+  carrée de la dimension (scaling) pour empêcher l'explosion des variances.
+- Le softmax transforme ces scores en poids probabilistes $\alpha_{ij} \in [0, 1]$
+  sommant à 1 par ligne.
+
+**Attention causale**
+- Pour les modèles de langage lisant et générant de gauche à droite, on applique
+  un **masque causal** empêchant chaque token d'accéder aux tokens futurs.
+- Deux approches équivalentes : (1) appliquer softmax puis masquer et renormaliser,
+  ou (2) remplacer les scores futurs par $-\infty$ avant softmax — la seconde est
+  plus efficace en pratique.
+- Le dropout appliqué aux poids d'attention renforce la robustesse du modèle en
+  le forçant à ne pas sur-dépendre de connexions individuelles.
+
+**Attention multi-têtes**
+- Une seule tête d'attention capture une seule façon de combiner les tokens. Plusieurs
+  têtes opérant en parallèle permettent au modèle d'explorer plusieurs sous-espaces
+  et relations simultanément.
+- L'implémentation naïve (stacker des modules mono-têtes) est conceptuellement simple
+  mais inefficace : on répète la multiplication matricielle (l'opération la plus coûteuse)
+  $H$ fois.
+- L'implémentation efficace (classe `MultiHeadAttention`) effectue une seule projection
+  de dimension $d_{out} = H \cdot d_h$, puis découpe et réorganise via `.view()` et
+  `.transpose()` sans copier les données. Les opérations matricielles résultantes
+  (produit par lots sur tous les têtes) exploitent la vectorisation GPU.
+
+**Opérations tensorielles et gestion mémoire**
+- `.view()` et `.transpose()` sont des opérations sans copie : elles ne modifient
+  que la façon dont PyTorch accède à la mémoire.
+- `.transpose()` crée une divergence entre l'ordre logique et l'ordre mémoire, ce
+  qui rend `.view()` impossible à appliquer directement après.
+- `.contiguous()` résout cet écart en réallouant et réécrivant les données de manière
+  que les deux ordres coïncident — une opération nécessaire avant `.view()`.
+
+**Échelle réelle : GPT-2**
+- Le plus petit GPT-2 (117M paramètres) dispose de 12 têtes, une dimension d'embedding
+  de 768, et une longueur de contexte de 1 024. Chaque tête opère en dimension 64.
+- Les architectures modernes de LLM (GPT-3, LLaMA, etc.) augmentent ce nombre de
+  têtes (jusqu'à 96 pour GPT-3 large) et les dimensions (jusqu'à 12 288), mais le
+  design fondamental reste le même.
