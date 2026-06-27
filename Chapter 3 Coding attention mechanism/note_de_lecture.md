@@ -1675,3 +1675,9 @@ Les points clés du chapitre attention et multi-head attention :
 - Les architectures modernes de LLM (GPT-3, LLaMA, etc.) augmentent ce nombre de
   têtes (jusqu'à 96 pour GPT-3 large) et les dimensions (jusqu'à 12 288), mais le
   design fondamental reste le même.
+
+## Liens utiles
+
+* **[Understanding buffers](https://github.com/vleonel-junior/Build-a-large-language-model-from-scrach/blob/main/Chapter%203%20Coding%20attention%20mechanism/understanding_buffers.ipynb)** — Exploration des buffers dans les mécanismes d'attention
+
+* **[MHA implementations](https://github.com/vleonel-junior/Build-a-large-language-model-from-scrach/blob/main/Chapter%203%20Coding%20attention%20mechanism/mha_implementations/mha_implementations.ipynb)** — Implémentations pratiques du multi-head attention
